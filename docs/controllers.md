@@ -34,6 +34,7 @@ graph LR
     ClusterDeployment -->|references| Region
     ClusterDeployment -->|creates| ServiceSet
     ClusterDeployment -->|creates| ClusterDataSource
+    ClusterDeployment -->|references or creates| ClusterIPAMClaim
 
     Credential -->|references| Region
     Region -->|installs via HelmRelease| ProviderTemplate
@@ -401,7 +402,10 @@ On deletion, releases (removes finalizer from) `ClusterIdentity` objects on the 
 
 - Optionally resolves a `Region` for the deployment and obtains a regional client.
 - Resolves an optional `ClusterAuthentication` for kubeconfig authentication.
-- Resolves an optional `ClusterIPAMClaim` for IP address management.
+- Processes IPAM if `spec.ipamClaim` is set:
+  - If `spec.ipamClaim.clusterIPAMClaimSpec` is provided, the controller **creates** a `ClusterIPAMClaim` (named `<cd-name>-ipam`, owned by the `ClusterDeployment`) and sets `spec.ipamClaim.clusterIPAMClaimRef` to its name.
+  - If `spec.ipamClaim.clusterIPAMClaimRef` is provided, the controller fetches the existing `ClusterIPAMClaim` and verifies it references this cluster.
+  - In both cases, reconciliation is **blocked** (requeued) until `ClusterIPAMClaim.Status.Bound == true`. Once bound, `ClusterIPAM.Status.ProviderData` is injected into the HelmRelease values (with `ipamEnabled=true`).
 - Creates a `ServiceSet` for any services defined in `spec.services`.
 - Creates a `ClusterDataSource` if a `DataSource` is referenced.
 - On deletion, waits for cloud resources (CAPI cluster objects) to be fully deleted before removing its finalizer.
@@ -409,6 +413,7 @@ On deletion, releases (removes finalizer from) `ClusterIdentity` objects on the 
 #### Objects created / updated
 
 - `HelmRelease` (Flux) — installs the CAPI cluster chart
+- `ClusterIPAMClaim` — created and owned by the CD when `spec.ipamClaim.clusterIPAMClaimSpec` is set (named `<cd-name>-ipam`)
 - `ServiceSet` — if `spec.services` is non-empty
 - `ClusterDataSource` — if a DataSource is referenced
 
@@ -436,7 +441,15 @@ flowchart TD
     F -->|Yes| H[Delete HelmRelease]
     H --> I[Remove finalizer]
     D -->|No| J[Validate ClusterTemplate]
-    J --> K[Render Helm values from template + credential + overrides]
+    J --> J2{spec.ipamClaim set?}
+    J2 -->|Yes, clusterIPAMClaimSpec| J3[Create / update ClusterIPAMClaim\nnamed cd-name-ipam]
+    J2 -->|Yes, clusterIPAMClaimRef| J4[Fetch existing ClusterIPAMClaim]
+    J3 --> J5{ClusterIPAMClaim.Status.Bound?}
+    J4 --> J5
+    J5 -->|No| J6[Requeue — wait for IPAM]
+    J5 -->|Yes| J7[Inject ClusterIPAM.Status.ProviderData\ninto Helm values]
+    J7 --> K
+    J2 -->|No| K[Render Helm values from template + credential + overrides]
     K --> L[CreateOrUpdate HelmRelease]
     L --> M[Create / update ServiceSet for spec.services]
     M --> N[Create / update ClusterDataSource if needed]
@@ -773,12 +786,19 @@ graph TD
 ## IPAM Flow
 
 ```mermaid
-graph LR
-    ClusterDeployment -->|references| ClusterIPAMClaim
-    ClusterIPAMClaim -->|1:1 creates| ClusterIPAM
-    ClusterIPAM -->|provider=in-cluster| InClusterIPPool
-    ClusterIPAM -->|provider=infoblox| InfobloxIPPool
+graph TD
+    ClusterDeployment -->|spec.ipamClaim.clusterIPAMClaimSpec set| CreateClaim[ClusterDeploymentReconciler\ncreates ClusterIPAMClaim]
+    ClusterDeployment -->|spec.ipamClaim.clusterIPAMClaimRef set| FetchClaim[ClusterDeploymentReconciler\nfetches existing ClusterIPAMClaim]
+    CreateClaim --> ClusterIPAMClaim
+    FetchClaim --> ClusterIPAMClaim
+
+    ClusterIPAMClaim -->|ClusterIPAMClaimReconciler\n1:1 creates| ClusterIPAM
+    ClusterIPAM -->|ClusterIPAMReconciler\nprovider=in-cluster| InClusterIPPool
+    ClusterIPAM -->|ClusterIPAMReconciler\nprovider=infoblox| InfobloxIPPool
     InClusterIPPool -->|allocates| IPAddress
     InfobloxIPPool -->|allocates| IPAddress
-    IPAddress -->|injected into| ClusterDeployment_values[HelmRelease values]
+
+    ClusterIPAMClaim -->|status.bound=true| Unblock[ClusterDeploymentReconciler\nunblocked]
+    ClusterIPAM -->|status.providerData| Unblock
+    Unblock -->|injects ipamEnabled=true\n+ provider data| HelmRelease[HelmRelease values]
 ```
