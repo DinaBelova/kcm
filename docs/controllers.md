@@ -20,14 +20,17 @@ graph LR
     Management -->|creates| ManagementBackup
     Management -->|installs via HelmRelease| ProviderTemplate
 
-    AccessManagement -->|distributes| ClusterTemplateChain
-    AccessManagement -->|distributes| ServiceTemplateChain
-    AccessManagement -->|distributes| Credential
-    AccessManagement -->|distributes| ClusterAuthentication
-    AccessManagement -->|distributes| DataSource
+    AccessManagement -->|distributes copies of| ClusterTemplateChain
+    AccessManagement -->|distributes copies of| ServiceTemplateChain
+    AccessManagement -->|distributes copies of| Credential
+    AccessManagement -->|distributes copies of| ClusterAuthentication
+    AccessManagement -->|distributes copies of| DataSource
 
     ClusterTemplateChain -->|copies| ClusterTemplate
     ServiceTemplateChain -->|copies| ServiceTemplate
+
+    User([User / admin]) -->|creates directly| Credential
+    User -->|creates directly| ClusterDeployment
 
     ClusterDeployment -->|references| ClusterTemplate
     ClusterDeployment -->|references| Credential
@@ -321,7 +324,9 @@ Mirrors `ClusterTemplateChainReconciler` for service templates. Copies `ServiceT
 
 #### What it does
 
-`AccessManagement` is a singleton cluster-scoped resource that defines access rules: which `ClusterTemplateChain`, `ServiceTemplateChain`, `Credential`, `ClusterAuthentication`, and `DataSource` objects should be available in which namespaces (selected by name list or label selector).
+`AccessManagement` is an **optional** singleton cluster-scoped resource. `Credential` objects (and other resources it distributes) can be created directly by a user in any namespace without involving `AccessManagement`. Its purpose is purely convenience: it copies objects from the system namespace into user namespaces so that tenants can use them without needing cluster-admin access.
+
+It defines access rules: which `ClusterTemplateChain`, `ServiceTemplateChain`, `Credential`, `ClusterAuthentication`, and `DataSource` objects should be available in which namespaces (selected by name list or label selector).
 
 For each access rule the reconciler:
 1. Resolves target namespaces (by list or label selector).
